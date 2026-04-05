@@ -343,6 +343,9 @@ tr:hover td{background:rgba(255,255,255,.02)}
     </a>
 
     <div class="nav-section" style="margin-top:14px">Unelte</div>
+    <a href="/finder" class="nav-item <?= $currentPage === 'finder' ? 'active' : '' ?>" onclick="closeSidebarMobile()">
+      <span class="icon">&#127919;</span> Domain Finder
+    </a>
     <a href="/lookup" class="nav-item <?= $currentPage === 'lookup' ? 'active' : '' ?>" onclick="closeSidebarMobile()">
       <span class="icon">&#128270;</span> WHOIS Lookup
     </a>

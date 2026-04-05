@@ -109,9 +109,268 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ]);
         exit;
     }
+
+    if ($action === 'generate_alternatives') {
+        header('Content-Type: application/json');
+        $d = strtolower(trim($_POST['domain'] ?? ''));
+        $d = preg_replace('/^(https?:\/\/)?(www\.)?/', '', $d);
+        $d = rtrim($d, '/');
+        if (!isValidDomain($d)) { echo json_encode(['error' => 'Domeniu invalid']); exit; }
+        set_time_limit(30);
+        echo json_encode(generateDomainAlternatives($d));
+        exit;
+    }
 }
 
 $recentDomains = $db->query("SELECT domain, current_status FROM domains ORDER BY last_checked_at DESC LIMIT 16")->fetchAll();
+
+/* ============================================================
+   GENERARE ALTERNATIVE DOMENIU
+   ============================================================ */
+
+function generateDomainAlternatives(string $domain): array {
+    $dotPos = strrpos($domain, '.');
+    $base   = $dotPos !== false ? substr($domain, 0, $dotPos) : $domain;
+    $tld    = $dotPos !== false ? substr($domain, $dotPos + 1) : 'ro';
+
+    $candidates = [];
+
+    // 1. Acelasi base, TLD-uri diferite
+    foreach (['com', 'ro', 'net', 'eu', 'io', 'co', 'app', 'org'] as $t) {
+        if ($t !== $tld) $candidates[] = "$base.$t";
+    }
+
+    // 2. Prefixe + base
+    foreach (['my', 'get', 'go', 'pro', 'smart', 'use', 'the', 'top', 'best', 'try'] as $px) {
+        $v = $px . $base;
+        if (strlen($v) <= 18) {
+            $candidates[] = "$v.$tld";
+            if ($tld !== 'com') $candidates[] = "$v.com";
+        }
+    }
+
+    // 3. Base + sufixe
+    foreach (['hub', 'lab', 'pro', 'app', 'hq', 'plus', 'now', 'go', 'ly', 'co'] as $sx) {
+        $v = $base . $sx;
+        if (strlen($v) <= 18) {
+            $candidates[] = "$v.$tld";
+            if ($tld !== 'com') $candidates[] = "$v.com";
+        }
+    }
+
+    // 4. Sparge base-ul in cuvinte-cheie si recombina
+    $kws      = splitCompoundKeywords($base);
+    $industry = detectIndustryFromBase($base);
+
+    if (count($kws) >= 2) {
+        // Ordine inversata
+        $rev = implode('', array_reverse($kws));
+        if ($rev !== $base) {
+            $candidates[] = "$rev.$tld";
+            if ($tld !== 'com') $candidates[] = "$rev.com";
+        }
+        // Cu cratima
+        $candidates[] = implode('-', $kws) . ".$tld";
+
+        // Per cuvant-cheie
+        foreach ($kws as $kw) {
+            if (strlen($kw) >= 4) {
+                foreach (['hub', 'lab', 'pro', 'app'] as $sx) {
+                    $v = $kw . $sx;
+                    $candidates[] = "$v.$tld";
+                    if ($tld !== 'com') $candidates[] = "$v.com";
+                }
+                foreach (['my', 'go', 'get'] as $px) {
+                    $v = $px . $kw;
+                    $candidates[] = "$v.$tld";
+                    if ($tld !== 'com') $candidates[] = "$v.com";
+                }
+            }
+        }
+    }
+
+    // 5. Sinonime din industrie
+    foreach (industrySynonymCombinations($kws, $industry, $tld) as $syn) {
+        $candidates[] = $syn;
+    }
+
+    // Curata si scoreza
+    $seen   = [];
+    $scored = [];
+    foreach (array_unique($candidates) as $cand) {
+        if ($cand === $domain) continue;
+        if (!preg_match('/^[a-z0-9][a-z0-9\-]{1,20}[a-z0-9]\.[a-z]{2,}$/', $cand)) continue;
+        [$cBase] = explode('.', $cand);
+        if (str_contains($cBase, '--'))  continue;
+        if (!isset($seen[$cBase])) $seen[$cBase] = 0;
+        if ($seen[$cBase] >= 3)    continue;
+        $seen[$cBase]++;
+
+        [$sc, $reason] = scoreDomainStatic($cand, $kws, $industry, $tld);
+        $scored[] = ['domain' => $cand, 'score' => $sc, 'reason' => $reason, 'available' => null];
+    }
+
+    usort($scored, fn($a, $b) => $b['score'] <=> $a['score']);
+    return array_values(array_slice($scored, 0, 25));
+}
+
+function splitCompoundKeywords(string $word): array {
+    // Dictionar extins de cuvinte reale — fara split la jumatate care produce nonsens
+    $known = [
+        'solutions','marketing','skincare','frumusete','ingrijire','investitie',
+        'digital','perfect','agenda','studio','market','design','network',
+        'finance','medical','natural','premium','beauty','beauty',
+        'white','black','cyber','secure','shield','smart','clean','fresh',
+        'bloom','guide','daily','light','brand','radar','trust','green','blue',
+        'tech','code','data','skin','care','face','hair','body','tone','base',
+        'labs','plus','hub','lab','app','web','net','bio','eco','pro',
+        'news','blog','shop','store','cafe','zone','core','flow','edge','gate',
+        'link','list','live','feed','grid','spot','home','team','work','desk',
+        'page','note','book','card','dash','deck','dock','flag','fork','hack',
+        'helm','host','icon','idea','info','init','iris','item','join','jump',
+        'kick','kind','know','lead','leaf','lean','left','lens','life','like',
+        'lime','lion','load','loft','loop','loss','love','luck','make','mark',
+        'mass','meta','mile','mint','mode','moon','move','name','near','need',
+        'next','node','open','over','pack','paid','palm','part','pass','path',
+        'peak','pick','pine','plan','play','plot','plug','poll','pool','port',
+        'post','push','rank','rate','read','real','rent','rich','ring','risk',
+        'road','role','roll','room','root','rule','rush','safe','sale','save',
+        'scan','seed','self','sell','send','shop','show','sign','site','size',
+        'soft','solo','song','sort','spin','stay','step','stop','suit','sync',
+        'tags','task','team','test','text','tick','tide','time','tips','tool',
+        'tour','town','tree','turn','type','user','vast','view','volt','wait',
+        'walk','warm','wave','week','wide','wiki','wild','wire','wise','word',
+        'hat','fox','bay','box','bit','bot','buy','buy','cdn','dev','fix',
+        'fun','get','git','gpu','key','log','map','pay','run','sdk','seo',
+        'sql','top','use','vip','vpn','win','xml',
+    ];
+    usort($known, fn($a, $b) => strlen($b) - strlen($a));
+
+    $parts  = [];
+    $rest   = $word;
+    $safety = 0;
+    while (strlen($rest) > 0 && $safety++ < 10) {
+        $matched = false;
+        foreach ($known as $kw) {
+            if (str_starts_with($rest, $kw) && strlen($kw) >= 3) {
+                $parts[] = $kw;
+                $rest    = substr($rest, strlen($kw));
+                $matched = true;
+                break;
+            }
+        }
+        // Nicio potrivire → pastreaza restul si opreste
+        // NU facem split la jumatate — produce combinatii fara sens
+        if (!$matched) {
+            if (empty($parts)) $parts[] = $rest; // intreg cuvantul daca nu a inceput nici o potrivire
+            break;
+        }
+    }
+
+    return $parts ?: [$word];
+}
+
+function detectIndustryFromBase(string $base): string {
+    $map = [
+        'beauty'  => ['glow','skin','beauty','care','face','makeup','hair','lip','eye','cream','serum','mask','tone','frumusete','ingrijire','rutina','cosmetic','skincare','bright','pure','fresh','radiant'],
+        'tech'    => ['tech','code','dev','app','web','digital','data','cloud','software','cyber','pixel','logic','node','byte','stack'],
+        'food'    => ['food','eat','cook','taste','chef','recipe','mancare','reteta','bite','savor','feast','plate','menu'],
+        'health'  => ['health','medical','clinic','doctor','pharma','fit','sport','wellness','sanatate','vita','pulse'],
+        'finance' => ['finance','invest','money','bank','credit','loan','bani','investitie','fund','yield','capital','asset'],
+        'travel'  => ['travel','trip','tour','flight','hotel','booking','voyage','journey','explore','roam'],
+        'edu'     => ['learn','study','edu','school','course','training','academy','teach','skill','tutor'],
+    ];
+    foreach ($map as $ind => $kws) {
+        foreach ($kws as $kw) {
+            if (str_contains($base, $kw)) return $ind;
+        }
+    }
+    return 'general';
+}
+
+function industrySynonymCombinations(array $kws, string $industry, string $tld): array {
+    $synonyms = [
+        'beauty'  => ['glow','radiant','bloom','luminous','belle','aura','pura','vibes','grace','velvet','shimmer','lumi','skyn','glami','zest'],
+        'tech'    => ['nexus','forge','craft','logic','pivot','launch','sprint','deploy','stack','node','byte','flux'],
+        'food'    => ['plate','savor','bite','zest','spice','feast','kitchen','grills','nourish','tables'],
+        'health'  => ['vitae','forte','vigour','optimal','prime','elevate','thrive','activate','revive','renew'],
+        'finance' => ['yield','equit','capita','asset','profit','gain','vest','forte','prime'],
+        'travel'  => ['roam','venture','wander','atlas','route','compass','horizon','trek','escape'],
+        'edu'     => ['nexus','mentis','gradus','campus','tutor','scholar','spark','master','skill'],
+        'general' => ['hub','lab','studio','works','space','zone','base','core','peak','rise','edge','plus'],
+    ];
+
+    $words      = $synonyms[$industry] ?? $synonyms['general'];
+    $candidates = [];
+    $primaryKw  = $kws[0] ?? '';
+
+    if (strlen($primaryKw) >= 3) {
+        foreach (array_slice($words, 0, 8) as $syn) {
+            $v1 = $primaryKw . $syn;
+            $v2 = $syn . $primaryKw;
+            if (strlen($v1) >= 4 && strlen($v1) <= 15) {
+                $candidates[] = "$v1.$tld";
+                if ($tld !== 'com') $candidates[] = "$v1.com";
+            }
+            if ($v2 !== $v1 && strlen($v2) >= 4 && strlen($v2) <= 15) {
+                $candidates[] = "$v2.$tld";
+                if ($tld !== 'com') $candidates[] = "$v2.com";
+            }
+        }
+    }
+    // Sinonime standalone scurte
+    foreach (array_slice($words, 0, 4) as $syn) {
+        if (strlen($syn) >= 4 && strlen($syn) <= 10) {
+            $candidates[] = "$syn.$tld";
+            if ($tld !== 'com') $candidates[] = "$syn.com";
+        }
+    }
+    return $candidates;
+}
+
+function scoreDomainStatic(string $domain, array $keywords, string $industry, string $originalTld): array {
+    [$base, $tld] = array_pad(explode('.', $domain, 2), 2, 'com');
+    $len   = strlen($base);
+    $score = 0;
+    $parts = [];
+
+    // Lungime (max 30)
+    if ($len <= 7)      { $score += 30; $parts[] = 'foarte scurt'; }
+    elseif ($len <= 10) { $score += 22; $parts[] = 'scurt';       }
+    elseif ($len <= 13) { $score += 13; $parts[] = 'mediu';       }
+    else                { $score +=  4; $parts[] = 'lung';        }
+
+    // Pronuntabilitate (max 25)
+    $vow   = preg_match_all('/[aeiouy]/i', $base);
+    $ratio = $len > 0 ? $vow / $len : 0;
+    if ($ratio >= 0.30 && $ratio <= 0.60) { $score += 20; $parts[] = 'usor de pronuntat'; }
+    elseif ($ratio >= 0.20)               { $score += 12; }
+    else                                  { $score +=  4; $parts[] = 'greu de pronuntat'; }
+    if (!preg_match('/[bcdfghjklmnpqrstvwxyz]{3}/i', $base)) $score += 5;
+
+    // TLD (max 15)
+    if ($tld === 'ro')                              { $score += 15; $parts[] = '.ro';          }
+    elseif ($tld === 'com')                         { $score += 12; $parts[] = '.com';         }
+    elseif ($tld === 'eu')                          { $score +=  8; }
+    elseif (in_array($tld, ['io', 'co', 'app']))    { $score +=  6; $parts[] = '.'.$tld;      }
+    else                                            { $score +=  3; }
+
+    // Relevanta cuvinte-cheie (max 15)
+    foreach ($keywords as $kw) {
+        if (strlen($kw) >= 4 && str_contains($base, $kw)) {
+            $score += 10; $parts[] = "contine '$kw'"; break;
+        }
+    }
+    if ($industry !== 'general') $score += 5;
+
+    // Brandabilitate (max 15)
+    if (!preg_match('/\d/', $base))  $score += 8;  // fara cifre
+    if (!str_contains($base, '-'))   $score += 4;  // fara cratima
+    if ($len >= 5 && $len <= 10)     $score += 3;  // lungime ideala
+
+    $score = min(100, max(1, $score));
+    return [$score, implode(', ', $parts) ?: 'standard'];
+}
 
 include 'includes/header.php';
 ?>
@@ -212,6 +471,20 @@ include 'includes/header.php';
 .spinner-sm{display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,.25);border-top-color:var(--accent2);border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle}
 .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
 @keyframes spin{to{transform:rotate(360deg)}}
+
+/* ---- ALTERNATIVE DOMAINS ---- */
+.alt-card{background:var(--surface);border:1px solid rgba(139,92,246,.25);border-radius:14px;overflow:hidden;margin-top:16px;animation:fadeUp .25s ease}
+.alt-card-header{padding:16px 20px;display:flex;align-items:center;justify-content:space-between;background:linear-gradient(135deg,rgba(139,92,246,.08),rgba(59,130,246,.04));border-bottom:1px solid rgba(139,92,246,.15)}
+.alt-card-title{display:flex;align-items:center;gap:8px;font-size:.95rem;font-weight:600}
+.alt-table{width:100%;border-collapse:collapse}
+.alt-table th{text-align:left;font-size:.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:8px 16px;border-bottom:1px solid var(--border)}
+.alt-table td{padding:10px 16px;border-bottom:1px solid rgba(30,45,69,.5);font-size:.85rem;vertical-align:middle}
+.alt-table tr:last-child td{border-bottom:none}
+.alt-table tr.alt-available td{background:rgba(16,185,129,.03)}
+.alt-score-wrap{display:flex;align-items:center;gap:8px}
+.alt-score-bar{width:52px;height:5px;background:var(--surface2);border-radius:999px;overflow:hidden;flex-shrink:0}
+.alt-score-fill{height:100%;border-radius:999px;transition:width .5s ease}
+.alt-hint{padding:10px 16px;font-size:.75rem;color:var(--text3);border-top:1px solid var(--border);background:var(--surface2)}
 </style>
 
 <div class="page-header">
@@ -406,7 +679,8 @@ function renderSingleResult(d) {
         </div>
         <div class="result-actions">${act}</div>
         ${raw?`<div style="padding:0 20px 16px"><button class="btn btn-ghost btn-sm" style="width:100%;justify-content:center" onclick="toggleRaw(this)">&#128196; Arata Raw WHOIS</button><div class="whois-raw-wrap" style="display:none">${raw}</div></div>`:''}
-    </div>`;
+    </div>
+    ${(d.status==='registered'||d.status==='pending_delete') ? renderAltPlaceholder(d.domain) : ''}`;
     document.getElementById('singleResult').style.display='';
 }
 
@@ -766,6 +1040,8 @@ async function doBatchLookup() {
         const pct=Math.round(((i+1)/lines.length)*100);
         document.getElementById('batchBar').style.width=pct+'%';
         document.getElementById('batchCounter').textContent=`${i+1} / ${lines.length}`;
+        // Pauza minima intre verificari WHOIS (protectie rate-limit ROTLD / Verisign)
+        if(i < lines.length - 1) await new Promise(r => setTimeout(r, 1200));
     }
     btn.disabled=false; btn.textContent='Verifica toate'; batchRunning=false;
 }
@@ -978,6 +1254,140 @@ function renderInfra(d, domain) {
 
 function histCard(label, value, icon, extra) {
     return `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 12px"><div style="font-size:.7rem;color:var(--text3);text-transform:uppercase;font-weight:600;margin-bottom:4px">${icon} ${label}</div><div style="font-size:.85rem;font-weight:600;font-family:monospace">${value}</div>${extra ? '<div style="margin-top:4px">'+extra+'</div>' : ''}</div>`;
+}
+
+// ============================================================
+// ALTERNATIVE DOMAINS
+// ============================================================
+
+function renderAltPlaceholder(domain) {
+    return `<div class="alt-card" id="altSection">
+        <div class="alt-card-header">
+            <div class="alt-card-title">
+                <span style="width:26px;height:26px;background:rgba(139,92,246,.2);border-radius:7px;display:inline-flex;align-items:center;justify-content:center;font-size:14px">&#10024;</span>
+                Generare Alternative
+                <span style="font-size:.75rem;font-weight:400;color:var(--text3)">— domeniu ocupat</span>
+            </div>
+            <button class="btn btn-ghost btn-sm" id="altGenBtn" onclick="loadAlternatives('${domain}')">
+                &#9889; Genereaza
+            </button>
+        </div>
+        <div id="altContent">
+            <div style="padding:20px 20px;font-size:.875rem;color:var(--text2)">
+                Apasă <strong style="color:var(--text)">Genereaza</strong> pentru a vedea variante bazate pe cuvintele-cheie, industrie și sinonime — cu scor și verificare disponibilitate.
+            </div>
+        </div>
+    </div>`;
+}
+
+async function loadAlternatives(domain) {
+    const btn     = document.getElementById('altGenBtn');
+    const content = document.getElementById('altContent');
+    if (!btn || !content) return;
+
+    btn.disabled  = true;
+    btn.innerHTML = '<span class="spinner-sm"></span> Se genereaza...';
+    content.innerHTML = `<div style="padding:24px;text-align:center;color:var(--text2)">
+        <span class="spinner-sm" style="width:18px;height:18px;border-width:2px;display:inline-block;margin-right:8px"></span>
+        Se analizeaza domeniul si se genereaza variante...
+    </div>`;
+
+    try {
+        const fd = new FormData();
+        fd.append('action', 'generate_alternatives');
+        fd.append('domain', domain);
+        const resp = await fetch('/lookup', {method:'POST', body:fd});
+        const data = await resp.json();
+
+        if (data.error) {
+            content.innerHTML = `<div class="alert alert-danger" style="margin:12px 16px">${escHtml(data.error)}</div>`;
+            return;
+        }
+        if (!Array.isArray(data) || data.length === 0) {
+            content.innerHTML = `<div style="padding:20px;color:var(--text2);font-size:.875rem">Nu s-au putut genera alternative pentru acest domeniu.</div>`;
+            return;
+        }
+
+        renderAlternativesTable(data, content);
+
+        // Verifica disponibilitatea async — minim 1200ms intre cereri (rata WHOIS)
+        data.forEach((item, idx) => {
+            setTimeout(() => checkAltAvailability(item.domain, idx), idx * 1200);
+        });
+
+    } catch(e) {
+        content.innerHTML = `<div class="alert alert-danger" style="margin:12px 16px">Eroare la generare. Incearca din nou.</div>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = '&#8635; Regenereaza'; }
+    }
+}
+
+function renderAlternativesTable(items, container) {
+    const th = (txt) => `<th class="alt-th" style="text-align:left;font-size:.72rem;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;padding:8px 16px;border-bottom:1px solid var(--border);white-space:nowrap">${txt}</th>`;
+
+    let rows = '';
+    items.forEach((item, idx) => {
+        const scoreColor = item.score >= 70 ? '#10b981' : (item.score >= 50 ? '#f59e0b' : '#ef4444');
+        const scorePct   = item.score + '%';
+        rows += `<tr id="alt_row_${idx}">
+            <td style="padding:10px 16px;font-family:monospace;font-weight:600;font-size:.88rem">${escHtml(item.domain)}</td>
+            <td style="padding:10px 16px" id="alt_avail_${idx}">
+                <span class="spinner-sm" style="width:10px;height:10px;border-width:1.5px"></span>
+            </td>
+            <td style="padding:10px 16px">
+                <div class="alt-score-wrap">
+                    <div class="alt-score-bar">
+                        <div class="alt-score-fill" style="width:${scorePct};background:${scoreColor}"></div>
+                    </div>
+                    <span style="font-weight:700;font-size:.85rem;color:${scoreColor}">${item.score}</span>
+                </div>
+            </td>
+            <td style="padding:10px 16px;font-size:.78rem;color:var(--text2)">${escHtml(item.reason)}</td>
+            <td style="padding:10px 16px" id="alt_act_${idx}">
+                <span style="color:var(--text3);font-size:.8rem">—</span>
+            </td>
+        </tr>`;
+    });
+
+    container.innerHTML = `
+    <div class="table-wrap" style="border-top:1px solid var(--border)">
+        <table class="alt-table">
+            <thead><tr>
+                ${th('Domeniu')}${th('Disponibil')}${th('Scor')}${th('Motiv')}${th('Actiuni')}
+            </tr></thead>
+            <tbody id="altTbody">${rows}</tbody>
+        </table>
+    </div>
+    <div class="alt-hint">
+        &#128270; Se verifica disponibilitatea in background — ${items.length} variante • Scor bazat pe: lungime, pronuntabilitate, TLD, relevanta
+    </div>`;
+}
+
+async function checkAltAvailability(domain, idx) {
+    const availEl = document.getElementById(`alt_avail_${idx}`);
+    const actEl   = document.getElementById(`alt_act_${idx}`);
+    const rowEl   = document.getElementById(`alt_row_${idx}`);
+    if (!availEl) return;
+
+    try {
+        const fd = new FormData();
+        fd.append('action', 'batch_check');
+        fd.append('domain', domain);
+        const data = await (await fetch('/lookup', {method:'POST', body:fd})).json();
+        const st   = data.status || 'unknown';
+
+        if (st === 'available') {
+            availEl.innerHTML = `<span class="badge available" style="font-size:.72rem;padding:3px 8px">&#10003; Disponibil</span>`;
+            actEl.innerHTML   = `<a href="https://portal.chroot.ro/cart.php?a=add&domain=register&query=${encodeURIComponent(domain)}" target="_blank" class="btn btn-success btn-sm" style="padding:4px 10px;font-size:.78rem">&#128722; Cumpara</a>
+                <button class="btn btn-ghost btn-sm" style="padding:4px 10px;font-size:.78rem;margin-left:4px" onclick="openAddMonitor('${escHtml(domain)}')">+ Monitor</button>`;
+            if (rowEl) rowEl.style.background = 'rgba(16,185,129,.04)';
+        } else {
+            availEl.innerHTML = `<span class="badge ${st}" style="font-size:.72rem;padding:3px 8px">${statusLabel(st)}</span>`;
+            actEl.innerHTML   = `<button class="btn btn-ghost btn-sm" style="padding:4px 10px;font-size:.78rem" onclick="openAddMonitor('${escHtml(domain)}')">+ Monitor</button>`;
+        }
+    } catch(e) {
+        if (availEl) availEl.innerHTML = `<span style="color:var(--text3);font-size:.75rem">—</span>`;
+    }
 }
 </script>
 

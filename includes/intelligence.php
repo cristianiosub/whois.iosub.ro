@@ -959,8 +959,7 @@ function _shortIssuer(string $issuer): string {
     return substr($issuer, 0, 40);
 }
 
-// --- VirusTotal cu API key ---
-define('VT_API_KEY', 'd5f3bfe6f4e5b7817b0b9985cde8777425b43571c05e5e86df587ac04cac853e');
+// --- VirusTotal cu API key (definit in config.php) ---
 
 function _historyVirusTotal(string $domain): array {
     $ctx = stream_context_create([
