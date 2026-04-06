@@ -248,6 +248,20 @@ tr:hover td{background:rgba(255,255,255,.02)}
   .btn-icon{padding:6px 8px;font-size:.8rem}
 }
 </style>
+  <!-- Matomo -->
+  <script>
+    var _paq = window._paq = window._paq || [];
+    _paq.push(['trackPageView']);
+    _paq.push(['enableLinkTracking']);
+    (function() {
+      var u="//dexter.iosub.ro/";
+      _paq.push(['setTrackerUrl', u+'matomo.php']);
+      _paq.push(['setSiteId', '4']);
+      var d=document, g=d.createElement('script'), s=d.getElementsByTagName('script')[0];
+      g.async=true; g.src=u+'matomo.js'; s.parentNode.insertBefore(g,s);
+    })();
+  </script>
+  <!-- End Matomo Code -->
 </head>
 <body>
 

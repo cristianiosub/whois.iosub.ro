@@ -1396,4 +1396,4 @@ document.querySelectorAll('.modal-overlay').forEach(el => {
 });
 </script>
 
-<?php include 'includes/footer.php'; ?>
+<?php include 'includes/footer.php'; ?>
